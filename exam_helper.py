@@ -87,6 +87,11 @@ class ExamHelper:
             page = await browser.get_current_page()
             return await helper.get_question_status(params.qid, page)
 
+        @self.controller.action("提交作业")
+        async def submit_work_action(browser: Browser):
+            page = await browser.get_current_page()
+            return await helper.submit_work(page)
+
     async def get_question_status(self, qid: str, page=None):
         try:
             if qid in self.answered_questions:
@@ -95,7 +100,8 @@ class ExamHelper:
                     result={
                         "answered": True,
                         "answer": self.question_answers.get(qid),
-                        "source": "local_cache"
+                        "source": "local_cache",
+                        "options": []
                     }
                 )
 
@@ -118,8 +124,21 @@ class ExamHelper:
                         answered: false,
                         answer: null,
                         source: null,
-                        hasVisualSelection: false
+                        hasVisualSelection: false,
+                        options: []
                     }};
+
+                    // 选项提取
+                    if (['单选题', '多选题', '判断题'].includes(typename)) {{
+                        const optionNodes = container.querySelectorAll('[role="radio"], [role="checkbox"]');
+                        result.options = Array.from(optionNodes).map(opt => {{
+                            const value = opt.querySelector('[class*="choice"]')?.getAttribute('data') || '';
+                            const text = opt.querySelector('.answer_p')?.innerText.trim() || '';
+                            return {{ value, text }};
+                        }});
+                    }} else {{
+                        result.options = [];
+                    }}
 
                     if (typename === '填空题') {{
                         const textareas = container.querySelectorAll('textarea[id^="answerEditor' + qid + '"]');
@@ -173,7 +192,8 @@ class ExamHelper:
                 "type": "未知",
                 "answered": False,
                 "answer": None,
-                "source": "not_found"
+                "source": "not_found",
+                "options": []
             })
 
         except Exception as e:
@@ -242,6 +262,19 @@ class ExamHelper:
                     return null;
                 }
 
+                function getOptions(container, type) {
+                    if (["单选题", "多选题", "判断题"].includes(type)) {
+                        const optionNodes = container.querySelectorAll('[role="radio"], [role="checkbox"]');
+                        return Array.from(optionNodes).map(opt => {
+                            const value = opt.querySelector('[class*="choice"]')?.getAttribute('data') || '';
+                            const text = opt.querySelector('.answer_p')?.innerText.trim() || '';
+                            return { value, text };
+                        });
+                    } else {
+                        return [];
+                    }
+                }
+
                 try {
                     const questions = document.querySelectorAll('.questionLi');
                     const result = [];
@@ -251,6 +284,7 @@ class ExamHelper:
                         const displayNumber = q.querySelector('.mark_name')?.textContent.trim() || `题目 ${index + 1}`;
                         const type = getQuestionType(q);
                         const answer = getQuestionAnswer(q, type);
+                        const options = getOptions(q, type);
 
                         const status = {
                             index: index + 1,
@@ -260,7 +294,8 @@ class ExamHelper:
                             type: type,
                             answered: !!answer,
                             answer: answer,
-                            hasVisualSelection: getVisualState(q)
+                            hasVisualSelection: getVisualState(q),
+                            options: options
                         };
 
                         result.push(status);
@@ -341,11 +376,13 @@ class ExamHelper:
                 escaped = answer.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n")
                 success = await page.evaluate(f'''
                     () => new Promise(resolve => {{
-                        const editor = window.UE?.getEditor("{textarea_prefix}{i+1}");
+                        const editor = window.UE?.getEditor("{textarea_prefix}{{i_plus_1}}");
                         if (!editor || editor.destroyed) return resolve(false);
                         editor.ready(() => {{
                             try {{
                                 editor.setContent("{escaped}");
+                                const textarea = document.getElementById("{textarea_prefix}" + ({i}+1));
+                                if (textarea) {{ textarea.dispatchEvent(new Event('change', {{ bubbles: true }})); }}
                                 resolve(true);
                             }} catch (e) {{
                                 console.error("写入失败:", e);
@@ -353,7 +390,7 @@ class ExamHelper:
                             }}
                         }});
                     }})
-                ''')
+                '''.replace("{i_plus_1}", f"{i+1}"))
                 if not success:
                     return ActionResult(success=False, error=f"第 {i+1} 空设置失败")
 
@@ -391,6 +428,8 @@ class ExamHelper:
                 if (wrapper.getAttribute("aria-checked") === "true") return true;
                 
                 wrapper.click();
+                const hiddenInput = document.getElementById('answer' + qid);
+                if (hiddenInput) {{ hiddenInput.value = choice; hiddenInput.dispatchEvent(new Event('change', {{ bubbles: true }})); }}
                 return true;
             }})()
             '''
@@ -440,7 +479,8 @@ class ExamHelper:
                     if (wrapper.getAttribute("aria-checked") === "true") return true;
                     wrapper.click();
                 }});
- 
+                const hiddenInput = document.getElementById('answer' + qid);
+                if (hiddenInput) {{ hiddenInput.value = Array.from(choices).sort().join(''); hiddenInput.dispatchEvent(new Event('change', {{ bubbles: true }})); }}
                 return true;
             }})()
             '''
@@ -474,6 +514,7 @@ class ExamHelper:
             script = f'''
             (() => {{
                 const qid = "{qid}";
+                const choice_data = "{choice_data}";
                 const container = document.querySelector(`#question${{qid}}`) || document.querySelector(`[data="${{qid}}"]`);
                 if (!container) return "未找到题目容器";
  
@@ -481,11 +522,13 @@ class ExamHelper:
                 if (!allOptions || allOptions.length === 0) return "未找到判断选项";
  
                 for (const el of allOptions) {{
-                    if (el.getAttribute("data") !== "{choice_data}") continue;
+                    if (el.getAttribute("data") !== choice_data) continue;
                     const wrapper = el.closest('.answerBg');
                     if (!wrapper) return "未找到点击容器";
                     if (wrapper.getAttribute("aria-checked") === "true") return true;
                     wrapper.click();
+                    const hiddenInput = document.getElementById('answer' + qid);
+                    if (hiddenInput) {{ hiddenInput.value = choice_data; hiddenInput.dispatchEvent(new Event('change', {{ bubbles: true }})); }}
                     break;
                 }}
  
@@ -504,3 +547,18 @@ class ExamHelper:
         except Exception as e:
             logger.exception("判断题设置失败")
             return ActionResult(success=False, error=f"判断题设置时出错: {str(e)}")
+
+    async def submit_work(self, page=None):
+        """
+        调用页面的 saveWork 函数提交所有答案
+        """
+        if page is None:
+            page = await self._get_current_page()
+            if not page:
+                return ActionResult(success=False, error="无法获取当前页面")
+        try:
+            # 调用页面原生提交逻辑
+            await page.evaluate("saveWork()");
+            return ActionResult(success=True, result="已触发提交作业")
+        except Exception as e:
+            return ActionResult(success=False, error=f"提交作业时出错: {e}")
